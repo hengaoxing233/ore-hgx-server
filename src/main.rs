@@ -52,20 +52,14 @@ impl Wallet {
         }
     }
 
-    async fn init(&self) {
-        let mut nonce_start = self.nonce_start.write().await;
-        let mut nonce_end = self.nonce_end.write().await;
-        let mut challenge = self.challenge.write().await;
-        let mut current_difficulty = self.current_difficulty.write().await;
-        let mut d = self.d.write().await;
-        let mut n = self.n.write().await;
-
-        *nonce_start = 0_u64;
-        *nonce_end = 2_000_000_u64;
-        *challenge = String::new();
-        *current_difficulty = 0_u64;
-        *d = String::new();
-        *n = String::new();
+    async fn init(&self) -> &Self {
+        *self.nonce_start.write().await = 0_u64;
+        *self.nonce_end.write().await = 2_000_000_u64;
+        *self.challenge.write().await = String::new();
+        *self.current_difficulty.write().await = 0_u64;
+        *self.d.write().await = String::new();
+        *self.n.write().await = String::new();
+        self
     }
 
     async fn add_nonce(&self) -> (u64, u64) {
@@ -81,43 +75,35 @@ impl Wallet {
     }
 
     async fn set_challenge(&self, challenge: String) {
-        let mut challenge_lock = self.challenge.write().await;
-        *challenge_lock = challenge;
+        *self.challenge.write().await = challenge;
     }
 
     async fn get_challenge(&self) -> String {
-        let challenge_lock = self.challenge.read().await;
-        challenge_lock.clone()
+        self.challenge.read().await.clone()
     }
 
     async fn set_current_difficulty(&self, difficulty: u64) {
-        let mut difficulty_lock = self.current_difficulty.write().await;
-        *difficulty_lock = difficulty;
+        *self.current_difficulty.write().await = difficulty;
     }
 
     async fn get_current_difficulty(&self) -> u64 {
-        let difficulty_lock = self.current_difficulty.read().await;
-        *difficulty_lock
+        *self.current_difficulty.read().await
     }
 
     async fn get_d(&self) -> String {
-        let d_lock = self.d.read().await;
-        d_lock.clone()
+        self.d.read().await.clone()
     }
 
     async fn set_d(&self, d: String) {
-        let mut d_lock = self.d.write().await;
-        *d_lock = d;
+        *self.d.write().await = d;
     }
 
     async fn get_n(&self) -> String {
-        let n_lock = self.n.read().await;
-        n_lock.clone()
+        self.n.read().await.clone()
     }
 
     async fn set_n(&self, n: String) {
-        let mut n_lock = self.n.write().await;
-        *n_lock = n;
+        *self.n.write().await = n;
     }
 
     fn get_pubkey(&self) -> String {
@@ -162,34 +148,38 @@ struct DataRet {
     code: i32,
     message: String,
 }
-
 #[derive(Deserialize, Serialize, Debug)]
 struct ChallengeResponse {
-    pubkey: String,
+    pubkey:String,
     code: i32,
     message: String,
     challenge: String,
+    // cutoff_time: u64,
     min_difficulty: u64,
     nonce_start: u64,
     nonce_end: u64,
 }
-
 #[derive(Deserialize, Serialize, Debug)]
 struct SolutionResponse {
     challenge: String,
     d: String,
     n: String,
     difficulty: u64,
-    pubkey: String,
+    pubkey:String,
 }
 
 fn array_to_base64(data: &[u8; 32]) -> String {
     base64::encode(data)
 }
-
 fn base64_to_array(base64_string: &str) -> Result<[u8; 32], &'static str> {
     let decoded_bytes = base64::decode(base64_string).map_err(|_| "Invalid Base64 input")?;
-    let array: [u8; 32] = decoded_bytes.as_slice().try_into().map_err(|_| "Decoded byte length is not 32")?;
+
+    // Ensure the decoded bytes have exactly 32 elements
+    let array: [u8; 32] = decoded_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "Decoded byte length is not 32")?;
+
     Ok(array)
 }
 
@@ -197,6 +187,7 @@ fn u8_16_to_base64(data: [u8; 16]) -> String {
     base64::encode(&data)
 }
 
+// Convert Base64 to [u8; 16]
 fn base64_to_u8_16(encoded: &str) -> Result<[u8; 16], base64::DecodeError> {
     let decoded = base64::decode(encoded)?;
     let mut array = [0u8; 16];
@@ -204,18 +195,19 @@ fn base64_to_u8_16(encoded: &str) -> Result<[u8; 16], base64::DecodeError> {
     Ok(array)
 }
 
+// Convert [u8; 8] to Base64
 fn u8_8_to_base64(data: [u8; 8]) -> String {
     base64::encode(&data)
 }
 
+// Convert Base64 to [u8; 8]
 fn base64_to_u8_8(encoded: &str) -> Result<[u8; 8], base64::DecodeError> {
     let decoded = base64::decode(encoded)?;
     let mut array = [0u8; 8];
     array.copy_from_slice(&decoded);
     Ok(array)
 }
-
-async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc: Arc<RpcClient>) {
+async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
     let getchallenge_route = {
         let wallet_pool_clone = wallet_pool.clone();
         let rpc_clone = rpc.clone();
@@ -226,10 +218,15 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc: Arc<RpcClient>) {
                 let rpc = rpc_clone.clone();
                 async move {
                     let wallet_size = wallet_pool.read().await.get_size();
-                    if wallet_size <= 0 {
+                    let mut wallet = wallet_pool.read().await.wallets[0].clone();
+                    let mut proof;
+                    let mut challenge_str;
+                    let mut end = true;
+                    if wallet_size <=0 {
                         let response = ChallengeResponse {
                             pubkey: "".to_string(),
                             challenge: "".to_string(),
+                            // cutoff_time: 0,
                             min_difficulty: 0,
                             nonce_start: 0,
                             nonce_end: 0,
@@ -237,45 +234,49 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc: Arc<RpcClient>) {
                             message: "当前没有任务,请等待".to_string(),
                         };
                         Ok::<_, warp::Rejection>(warp::reply::json(&response))
-                    } else {
-                        let mut wallet = wallet_pool.read().await.next_wallet();
-                        for _ in 0..wallet_size {
-                            let challenge_str = wallet.get_challenge().await;
-                            if !challenge_str.is_empty() {
-                                break;
-                            }
+                    }else {
+                        for _ in 0..wallet_size{
                             wallet = wallet_pool.read().await.next_wallet();
+                            challenge_str = wallet.get_challenge().await;
+                            if challenge_str.is_empty(){
+                                continue
+                            }else {
+                                end = false;
+                                break
+                            }
                         }
-
-                        let proof = wallet.get_proof(&*rpc).await;
-                        let challenge_str = wallet.get_challenge().await;
-
-                        if challenge_str.is_empty() {
+                        if end {
                             let response = ChallengeResponse {
                                 pubkey: "".to_string(),
                                 challenge: "".to_string(),
+                                // cutoff_time: 0,
                                 min_difficulty: 0,
                                 nonce_start: 0,
                                 nonce_end: 0,
                                 code: 0,
-                                message: "无法获取挑战".to_string(),
+                                message: "当前没有任务,请等待".to_string(),
                             };
                             Ok::<_, warp::Rejection>(warp::reply::json(&response))
-                        } else {
-                            let nonce_start = wallet.nonce_start.read().await;
-                            let nonce_end = wallet.nonce_end.read().await;
+                        }else {
+                            proof = wallet.get_proof(&*rpc).await;
+                            challenge_str = wallet.get_challenge().await;
+                            // let cutoff_time = get_cutoff(proof, 5);
+                            let min_difficulty_data = MIN_DIFF;
+                            let (nonce_start, nonce_end) = wallet.add_nonce().await;
                             let response = ChallengeResponse {
                                 pubkey: wallet.get_pubkey(),
                                 challenge: challenge_str,
-                                min_difficulty: MIN_DIFF as u64,
-                                nonce_start: *nonce_start,
-                                nonce_end: *nonce_end,
+                                // cutoff_time: cutoff_time as u64,
+                                min_difficulty: min_difficulty_data as u64,
+                                nonce_start,
+                                nonce_end,
                                 code: 1,
-                                message: "挑战成功获取".to_string(),
+                                message: "Ok".to_string(),
                             };
                             Ok::<_, warp::Rejection>(warp::reply::json(&response))
                         }
                     }
+
                 }
             })
     };
@@ -324,8 +325,9 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc: Arc<RpcClient>) {
                 }
             })
     };
-    println!("服务端监听：0.0.0.0：8989");
+
     let routes = setsolution_route.or(getchallenge_route);
+    println!("服务器监听：0.0.0.1:8989");
     warp::serve(routes).run(([0, 0, 0, 0], 8989)).await;
 }
 
@@ -357,8 +359,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rpc_client = Arc::new(RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed()));
     let rpc_clone_therad = rpc_client.clone();
     let rpc_clone_tokio = rpc_client.clone();
-
-    let wallet_pool_clone = wallet_pool.clone();
     thread::spawn(move || {
         let rpc_clone = rpc_clone_therad.clone();
         tokio::runtime::Builder::new_current_thread()
@@ -366,7 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()
             .unwrap()
             .block_on(async {
-                server(wallet_pool_clone, rpc_clone).await;
+                server(wallet_pool, rpc_clone).await;
             });
     });
 
@@ -379,8 +379,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let address = wallet_clone.get_pubkey();
             println!("[{}]加载钱包sol余额...", &address);
             match rpc_client.get_block_height().await {
-                Ok(height) => println!("区块高度：{}", height),
-                Err(e) => println!("获取区块高度错误：{}", e),
+                Ok(height) => println!("区块高度：{}",height),
+                Err(e) => println!("区块高度cuowu：{}",e),
             }
             let balance = if let Ok(balance) = rpc_client.get_balance(&keypair.pubkey()).await {
                 balance
