@@ -22,10 +22,14 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use tokio::sync::{RwLock};
-use tracing::{error, info};
+use tracing::{debug, error, info};
+use tracing_subscriber::fmt::{format, time::ChronoLocal};
 use walkdir::WalkDir;
 use warp::Filter;
+use crate::log::init_log;
+
 mod ore_utils;
+mod log;
 
 const MIN_DIFF: u32 = 8;
 
@@ -293,7 +297,7 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
                     let n_value = data.n;
                     let difficulty_value = data.difficulty;
                     let challenge_value = data.challenge;
-                    // println!("pubkey:{}, d: {}, n: {}, difficulty: {}", pubkey, d_value, n_value, difficulty_value);
+                    // info!("pubkey:{}, d: {}, n: {}, difficulty: {}", pubkey, d_value, n_value, difficulty_value);
                     let wallet = wallet_pool.read().await.get_wallet_by_pubkey(&pubkey).unwrap();
                     let challenge_str = wallet.get_challenge().await;
 
@@ -327,22 +331,23 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
     };
 
     let routes = setsolution_route.or(getchallenge_route);
-    println!("服务器监听：0.0.0.1:8989");
+    info!("服务端监听：0.0.0.0:8989");
     warp::serve(routes).run(([0, 0, 0, 0], 8989)).await;
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
+    init_log();
     // load envs
     let wallet_path_str = std::env::var("WALLET_PATH").expect("WALLET_PATH must be set.");
     let rpc_url = std::env::var("RPC_URL").expect("RPC_URL must be set.");
-    println!("加载RPC：{}",rpc_url);
+    info!("加载RPC：{}",rpc_url);
     let mut wallet_paths = vec![];
     for entry in WalkDir::new(wallet_path_str).into_iter().filter_map(Result::ok) {
         let path = entry.path();
         if path.extension().map_or(false, |ext| ext == "json") {
-            println!("找到json文件: {}", path.display());
+            info!("找到json文件: {}", path.display());
             wallet_paths.push(path.to_str().unwrap().to_string());
         }
     }
@@ -377,30 +382,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rpc_client = rpc_client_for_spawn.clone();
             let keypair = &wallet_clone.keypairs;
             let address = wallet_clone.get_pubkey();
-            println!("[{}]加载钱包sol余额...", &address);
-            match rpc_client.get_block_height().await {
-                Ok(height) => println!("区块高度：{}",height),
-                Err(e) => println!("区块高度cuowu：{}",e),
-            }
+            let addtess_short = &address[..7];
+            info!("[{}]加载钱包sol余额...", &addtess_short);
+
             let balance = if let Ok(balance) = rpc_client.get_balance(&keypair.pubkey()).await {
                 balance
             } else {
-                println!("[{}]加载sol余额失败",&address);
+                info!("[{}]加载sol余额失败",&addtess_short);
                 return
             };
 
-            println!("[{}]sol余额: {:.2}", &address, balance as f64 / LAMPORTS_PER_SOL as f64);
+            info!("[{}]sol余额: {}", &addtess_short, balance as f64 / LAMPORTS_PER_SOL as f64);
 
             if balance < 1_000_000 {
-                println!("[{}]sol余额太少!",&address);
+                info!("[{}]sol余额太少!",&addtess_short);
                 return
             }
-            println!("[{}]正在读取proof.",&address);
+            info!("[{}]正在读取proof.",&addtess_short);
             let _proof = if let Ok(loaded_proof) = get_proof(&rpc_client, keypair.pubkey()).await {
                 loaded_proof
             } else {
-                println!("[{}]加载proof失败.",&address);
-                println!("[{}]正在创建proof账户...",&address);
+                info!("[{}]加载proof失败,可能未创建proof账户.",&addtess_short);
+                info!("[{}]正在创建proof账户...",&addtess_short);
                 let ix = get_register_ix(keypair.pubkey());
                 if let Ok((hash, _slot)) = rpc_client
                     .get_latest_blockhash_with_commitment(rpc_client.commitment()).await {
@@ -410,17 +413,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .send_and_confirm_transaction_with_spinner_and_commitment(
                             &tx, rpc_client.commitment()
                         ).await;
-                    if let Ok(sig) = result {
-                        println!("[{}]上链成功: {}",&address, sig.to_string());
-                    } else {
-                        println!("[{}]创建proof账户失败",&address);
-                        return
+                    match result {
+                        Ok(sig) => info!("[{}]创建proof账户成功: {}",&addtess_short, sig.to_string()),
+                        Err(e) => {
+                            error!("[{}]创建proof账户失败: {}",&addtess_short, e.to_string());
+                            return
+                        }
                     }
                 }
+                // 刚创建的proof账户，需要等待一下才能获取proof
+                tokio::time::sleep(Duration::from_millis(5000)).await;
                 let proof = if let Ok(loaded_proof) = get_proof(&rpc_client, keypair.pubkey()).await {
                     loaded_proof
                 } else {
-                    println!("[{}]获取proof失败",&address);
+                    info!("[{}]获取proof失败",&addtess_short);
                     return
                 };
                 proof
@@ -428,14 +434,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
             let mut challenge = array_to_base64(&proof.challenge);
             wallet_clone.set_challenge(challenge.clone()).await;
-            println!("[{}]读取到challenge：{}",&address,challenge);
-            println!("[{}]等待客户端计算",&address);
+            info!("[{}]读取到challenge：{}",&addtess_short,challenge);
+            info!("[{}]等待客户端计算",&addtess_short);
             let mut prio_fee = 8000;
             loop {
                 let cutoff = get_cutoff(proof, 0);
                 if cutoff <= 0 {
                     while wallet_clone.get_d().await.is_empty() && wallet_clone.get_n().await.is_empty(){
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        debug!("[{}]等待获取solution",&addtess_short);
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
                     }
                     let d = wallet_clone.get_d().await;
                     let n = wallet_clone.get_n().await;
@@ -462,14 +469,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let difficulty = solution.to_hash().difficulty();
 
-                    println!("[{}]开始提交尝试[difficulty {}]", &address,difficulty);
+                    info!("[{}]开始尝试提交【difficulty {}】,fee：{}", &addtess_short,difficulty,prio_fee);
 
                     for i in 0..3 {
                         let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_secs();
                         let mut ixs = vec![];
-
-
-                        println!("[{}]使用优先权fee {}", &address, prio_fee);
 
                         let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(480000);
                         ixs.push(cu_limit_ix);
@@ -495,43 +499,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let mut tx = Transaction::new_with_payer(&ixs, Some(&keypair.pubkey()));
 
                             tx.sign(&[&keypair], hash);
-                            println!("[{}]正在上链...",&address);
-                            println!("[{}]尝试次数: {}",&address, i + 1);
+                            info!("[{}]正在上链...尝试次数: {}",&addtess_short, i + 1);
                             let sig = rpc_client.send_and_confirm_transaction_with_spinner(&tx).await;
                             if let Ok(sig) = sig {
                                 // success
-                                println!("[{}]上链成功!哈希：{}",&address, sig);
+                                info!("[{}]上链成功!难度：【{}】，哈希：{}",&addtess_short, difficulty, sig);
                                 // update proof
                                 loop {
                                     if let Ok(loaded_proof) = get_proof(&rpc_client, keypair.pubkey()).await {
                                         if proof != loaded_proof {
-                                            println!("[{}]已获取到新的proof.",&address);
+
                                             let balance = (loaded_proof.balance as f64) / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
 
                                             let rewards = loaded_proof.balance - proof.balance;
                                             let dec_rewards = (rewards as f64) / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
-                                            println!("[{}]ore余额更新: {}",&address, balance);
-                                            println!("[{}]本次奖励ore：{}",&address, dec_rewards);
-                                            let proof_clone= proof.clone();
-                                            println!("提交成功的挑战：{}",array_to_base64(&proof_clone.challenge));
+                                            info!("[{}]ore余额更新: {}, 本次奖励ore：{}",&addtess_short, balance, dec_rewards);
                                             break
                                         }
                                     } else {
                                         tokio::time::sleep(Duration::from_millis(500)).await;
                                     }
                                 }
-                                prio_fee = prio_fee.saturating_sub(1_000);
+                                // prio_fee = prio_fee.saturating_sub(1_000);
                                 proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
                                 challenge = array_to_base64(&proof.challenge);
                                 wallet_clone.set_challenge(challenge.clone()).await;
+                                info!("[{}]已获取到新的proof。读取到challenge：{}，等待客户端计算",&addtess_short,challenge);
                                 break;
                             } else {
-                                if prio_fee < 1_000_000 {
-                                    prio_fee += 10000;
-                                }
+                                // if prio_fee < 1_000_000 {
+                                //     prio_fee += 10000;
+                                // }
                                 // sent error
                                 if i >= 2 {
-                                    println!("[{}]尝试3次仍无法发送。丢弃和刷新数据.",&address);
+                                    info!("[{}]尝试3次仍无法发送。丢弃和刷新数据.",&addtess_short);
                                     // reset nonce
                                     proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
                                     challenge = array_to_base64(&proof.challenge);
@@ -541,7 +542,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             tokio::time::sleep(Duration::from_millis(500)).await;
                         } else {
-                            println!("[{}]无法获取最新的区块哈希.重试中...",&address);
+                            info!("[{}]无法获取最新的区块哈希.重试中...",&addtess_short);
                             tokio::time::sleep(Duration::from_millis(1000)).await;
                         }
                     }
@@ -549,7 +550,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tokio::time::sleep(Duration::from_secs(cutoff as u64)).await;
                 };
             }
+            debug!("[{}]该账户挖矿停止",&addtess_short);
         });
+
     }
     loop{
         tokio::time::sleep(Duration::from_secs(10)).await;
