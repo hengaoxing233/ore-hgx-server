@@ -158,7 +158,7 @@ struct ChallengeResponse {
     code: i32,
     message: String,
     challenge: String,
-    // cutoff_time: u64,
+    cutoff_time: u64,
     min_difficulty: u64,
     nonce_start: u64,
     nonce_end: u64,
@@ -230,7 +230,7 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
                         let response = ChallengeResponse {
                             pubkey: "".to_string(),
                             challenge: "".to_string(),
-                            // cutoff_time: 0,
+                            cutoff_time: 0,
                             min_difficulty: 0,
                             nonce_start: 0,
                             nonce_end: 0,
@@ -253,7 +253,7 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
                             let response = ChallengeResponse {
                                 pubkey: "".to_string(),
                                 challenge: "".to_string(),
-                                // cutoff_time: 0,
+                                cutoff_time: 0,
                                 min_difficulty: 0,
                                 nonce_start: 0,
                                 nonce_end: 0,
@@ -262,15 +262,24 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
                             };
                             Ok::<_, warp::Rejection>(warp::reply::json(&response))
                         }else {
-                            proof = wallet.get_proof(&*rpc).await;
+                            proof = if let Ok(loaded_proof) = wallet.get_proof(&*rpc).await {
+                                loaded_proof
+                            } else {
+                                wallet.get_proof(&*rpc).await.unwrap()
+                            };
                             challenge_str = wallet.get_challenge().await;
-                            // let cutoff_time = get_cutoff(proof, 5);
+                            let cutoff_time = get_cutoff(proof, 5);
+                            let cutoff_time = if cutoff_time <= 0 || cutoff_time >= 10{
+                                10
+                            }else {
+                                cutoff_time
+                            };
                             let min_difficulty_data = MIN_DIFF;
                             let (nonce_start, nonce_end) = wallet.add_nonce().await;
                             let response = ChallengeResponse {
                                 pubkey: wallet.get_pubkey(),
                                 challenge: challenge_str,
-                                // cutoff_time: cutoff_time as u64,
+                                cutoff_time: cutoff_time as u64,
                                 min_difficulty: min_difficulty_data as u64,
                                 nonce_start,
                                 nonce_end,
@@ -303,7 +312,7 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
 
                     if challenge_value != challenge_str {
                         let response = DataRet {
-                            code: 1,
+                            code: 0,
                             message: "提交失败,该任务已过期".to_string(),
                         };
                         Ok::<_, warp::Rejection>(warp::reply::json(&response))
@@ -382,7 +391,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rpc_client = rpc_client_for_spawn.clone();
             let keypair = &wallet_clone.keypairs;
             let address = wallet_clone.get_pubkey();
-            let addtess_short = &address[..7];
+            let addtess_short = &address[..6];
             info!("[{}]加载钱包sol余额...", &addtess_short);
 
             let balance = if let Ok(balance) = rpc_client.get_balance(&keypair.pubkey()).await {
@@ -426,23 +435,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let proof = if let Ok(loaded_proof) = get_proof(&rpc_client, keypair.pubkey()).await {
                     loaded_proof
                 } else {
-                    info!("[{}]获取proof失败",&addtess_short);
-                    return
+                    tokio::time::sleep(Duration::from_millis(5000)).await;
+                    get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
                 };
                 proof
             };
-            let mut proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
+            // let mut proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
+            let mut proof = if let Ok(loaded_proof) = wallet_clone.get_proof(&rpc_client).await {
+                loaded_proof
+            } else {
+                tokio::time::sleep(Duration::from_millis(5000)).await;
+                get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
+            };
             let mut challenge = array_to_base64(&proof.challenge);
             wallet_clone.set_challenge(challenge.clone()).await;
             info!("[{}]读取到challenge：{}",&addtess_short,challenge);
             info!("[{}]等待客户端计算",&addtess_short);
             let mut prio_fee = 8000;
             loop {
-                let cutoff = get_cutoff(proof, 0);
+                let cutoff = get_cutoff(proof, 1);
+                let cutoff = if cutoff <= 0 {
+                    0
+                } else {
+                    cutoff
+                };
+                debug!("[{}]等待cutoff：{}",&addtess_short, cutoff);
                 if cutoff <= 0 {
+                    let timeout_duration = Duration::from_secs(15);
+                    let start_time = tokio::time::Instant::now();
+                    let mut timeout = false;
                     while wallet_clone.get_d().await.is_empty() && wallet_clone.get_n().await.is_empty(){
                         debug!("[{}]等待获取solution",&addtess_short);
+                        if start_time.elapsed() >= timeout_duration {
+                            timeout = true;
+                            // proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
+                            proof = if let Ok(loaded_proof) = wallet_clone.get_proof(&rpc_client).await {
+                                loaded_proof
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(5000)).await;
+                                get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
+                            };
+                            challenge = array_to_base64(&proof.challenge);
+                            wallet_clone.set_challenge(challenge.clone()).await;
+                            info!("[{}]获取solution超时，已获取到新的proof。读取到challenge：{}，等待客户端计算",&addtess_short,challenge);
+                            break;
+                        }
                         tokio::time::sleep(Duration::from_millis(1000)).await;
+                    }
+                    if timeout == true{
+                        continue
                     }
                     let d = wallet_clone.get_d().await;
                     let n = wallet_clone.get_n().await;
@@ -521,7 +562,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 // prio_fee = prio_fee.saturating_sub(1_000);
-                                proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
+                                // proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
+                                proof = if let Ok(loaded_proof) = wallet_clone.get_proof(&rpc_client).await {
+                                    loaded_proof
+                                } else {
+                                    tokio::time::sleep(Duration::from_millis(5000)).await;
+                                    get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
+                                };
                                 challenge = array_to_base64(&proof.challenge);
                                 wallet_clone.set_challenge(challenge.clone()).await;
                                 info!("[{}]已获取到新的proof。读取到challenge：{}，等待客户端计算",&addtess_short,challenge);
@@ -534,7 +581,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if i >= 2 {
                                     info!("[{}]尝试3次仍无法发送。丢弃和刷新数据.",&addtess_short);
                                     // reset nonce
-                                    proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
+                                    // proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
+                                    proof = if let Ok(loaded_proof) = wallet_clone.get_proof(&rpc_client).await {
+                                        loaded_proof
+                                    } else {
+                                        tokio::time::sleep(Duration::from_millis(5000)).await;
+                                        get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
+                                    };
                                     challenge = array_to_base64(&proof.challenge);
                                     wallet_clone.set_challenge(challenge.clone()).await;
                                     break;
