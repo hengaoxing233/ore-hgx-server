@@ -23,7 +23,6 @@ pub fn get_auth_ix(signer: Pubkey, ) -> Instruction {
 pub fn get_mine_ix(signer: Pubkey, solution: Solution, bus: usize) -> Instruction {
     instruction::mine(signer, signer, BUS_ADDRESSES[bus], solution)
 }
-
 pub fn get_register_ix(signer: Pubkey) -> Instruction {
     instruction::open(signer, signer, signer)
 }
