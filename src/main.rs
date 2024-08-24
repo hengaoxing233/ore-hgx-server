@@ -11,6 +11,7 @@ use ore_utils::{
     get_proof_and_config_with_busses, get_register_ix,
     get_reset_ix, ORE_TOKEN_DECIMALS
 };
+
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -41,10 +42,11 @@ struct Wallet {
     current_difficulty: Arc<RwLock<u64>>,
     d: Arc<RwLock<String>>,
     n: Arc<RwLock<String>>,
+    proof: Arc<RwLock<Proof>>,
 }
 
 impl Wallet {
-    fn new(keypair: Keypair) -> Self {
+    fn new(keypair: Keypair,proof:Proof) -> Self {
         Wallet {
             keypairs: keypair,
             nonce_start: Arc::new(RwLock::new(0_u64)),
@@ -53,6 +55,7 @@ impl Wallet {
             current_difficulty: Arc::new(RwLock::new(0_u64)),
             d: Arc::new(RwLock::new(String::new())),
             n: Arc::new(RwLock::new(String::new())),
+            proof: Arc::new(RwLock::new(proof)),
         }
     }
 
@@ -74,8 +77,11 @@ impl Wallet {
         (*start, *end)
     }
 
-    async fn get_proof(&self, rpc_client: &RpcClient) -> Result<Proof, String> {
-        get_proof(rpc_client, self.keypairs.pubkey()).await
+    async fn get_proof(&self) -> Proof {
+        self.proof.read().await.clone()
+    }
+    async fn set_proof(&self, proof: Proof) {
+        *self.proof.write().await = proof;
     }
 
     async fn set_challenge(&self, challenge: String) {
@@ -211,15 +217,13 @@ fn base64_to_u8_8(encoded: &str) -> Result<[u8; 8], base64::DecodeError> {
     array.copy_from_slice(&decoded);
     Ok(array)
 }
-async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
+async fn server(wallet_pool: Arc<RwLock<WalletPool>>) {
     let getchallenge_route = {
         let wallet_pool_clone = wallet_pool.clone();
-        let rpc_clone = rpc.clone();
         warp::path("getchallenge")
             .and(warp::get())
             .and_then(move || {
                 let wallet_pool = wallet_pool_clone.clone();
-                let rpc = rpc_clone.clone();
                 async move {
                     let wallet_size = wallet_pool.read().await.get_size();
                     let mut wallet = wallet_pool.read().await.wallets[0].clone();
@@ -262,13 +266,9 @@ async fn server(wallet_pool: Arc<RwLock<WalletPool>>, rpc:Arc<RpcClient>) {
                             };
                             Ok::<_, warp::Rejection>(warp::reply::json(&response))
                         }else {
-                            proof = if let Ok(loaded_proof) = wallet.get_proof(&*rpc).await {
-                                loaded_proof
-                            } else {
-                                wallet.get_proof(&*rpc).await.unwrap()
-                            };
+                            proof = wallet.get_proof().await;
                             challenge_str = wallet.get_challenge().await;
-                            let cutoff_time = get_cutoff(proof, 5);
+                            let cutoff_time = get_cutoff(proof, 3);
                             let cutoff_time = if cutoff_time <= 0 || cutoff_time >= 10{
                                 10
                             }else {
@@ -366,25 +366,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     let wallets: Vec<Arc<Wallet>> = keypairs.into_iter()
-        .map(|keypair| Arc::new(Wallet::new(keypair)))
+        .map(|keypair| {
+            let pubkey = keypair.pubkey().clone();
+            Arc::new(Wallet::new(keypair, Proof{
+                authority: pubkey,
+                balance: 0,
+                challenge: [0;32],
+                last_hash: [0;32],
+                last_hash_at: 0,
+                last_stake_at: 0,
+                miner: pubkey,
+                total_hashes: 0,
+                total_rewards: 0,
+            }))
+        })
         .collect();
     let wallet_pool = Arc::new(RwLock::new(WalletPool::new(wallets.clone())));
 
     let rpc_client = Arc::new(RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed()));
-    let rpc_clone_therad = rpc_client.clone();
     let rpc_clone_tokio = rpc_client.clone();
     thread::spawn(move || {
-        let rpc_clone = rpc_clone_therad.clone();
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
             .block_on(async {
-                server(wallet_pool, rpc_clone).await;
+                server(wallet_pool).await;
             });
     });
 
     for wallet in wallets{
+        tokio::time::sleep(Duration::from_millis(5000)).await;
         let rpc_client_for_spawn = rpc_clone_tokio.clone();  // 在循环内克隆
         tokio::spawn(async move {
             let wallet_clone = wallet.clone();
@@ -440,20 +452,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 proof
             };
+
             // let mut proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
-            let mut proof = if let Ok(loaded_proof) = wallet_clone.get_proof(&rpc_client).await {
-                loaded_proof
-            } else {
-                tokio::time::sleep(Duration::from_millis(5000)).await;
-                get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
-            };
+            let mut proof = _proof;
+            wallet_clone.set_proof(proof).await;
             let mut challenge = array_to_base64(&proof.challenge);
             wallet_clone.set_challenge(challenge.clone()).await;
             info!("[{}]读取到challenge：{}",&addtess_short,challenge);
             info!("[{}]等待客户端计算",&addtess_short);
             let mut prio_fee = 8000;
             loop {
-                let cutoff = get_cutoff(proof, 1);
+                let cutoff = get_cutoff(proof, 2);
                 let cutoff = if cutoff <= 0 {
                     0
                 } else {
@@ -469,12 +478,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if start_time.elapsed() >= timeout_duration {
                             timeout = true;
                             // proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
-                            proof = if let Ok(loaded_proof) = wallet_clone.get_proof(&rpc_client).await {
+                            proof = if let Ok(loaded_proof) = get_proof(&rpc_client, keypair.pubkey()).await {
                                 loaded_proof
                             } else {
                                 tokio::time::sleep(Duration::from_millis(5000)).await;
                                 get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
                             };
+                            wallet_clone.set_proof(proof).await;
                             challenge = array_to_base64(&proof.challenge);
                             wallet_clone.set_challenge(challenge.clone()).await;
                             info!("[{}]获取solution超时，已获取到新的proof。读取到challenge：{}，等待客户端计算",&addtess_short,challenge);
@@ -546,32 +556,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // success
                                 info!("[{}]上链成功!难度：【{}】，哈希：{}",&addtess_short, difficulty, sig);
                                 // update proof
+                                let old_proof = proof.clone();
                                 loop {
                                     if let Ok(loaded_proof) = get_proof(&rpc_client, keypair.pubkey()).await {
                                         if proof != loaded_proof {
-
+                                            proof = loaded_proof;
+                                            wallet_clone.set_proof(proof).await;
+                                            challenge = array_to_base64(&proof.challenge);
+                                            wallet_clone.set_challenge(challenge.clone()).await;
+                                            info!("[{}]已获取到新的proof。读取到challenge：{}，等待客户端计算",&addtess_short,challenge);
                                             let balance = (loaded_proof.balance as f64) / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
-
-                                            let rewards = loaded_proof.balance - proof.balance;
+                                            let rewards = loaded_proof.balance - old_proof.balance;
                                             let dec_rewards = (rewards as f64) / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
                                             info!("[{}]ore余额更新: {}, 本次奖励ore：{}",&addtess_short, balance, dec_rewards);
                                             break
                                         }
                                     } else {
-                                        tokio::time::sleep(Duration::from_millis(500)).await;
+                                        tokio::time::sleep(Duration::from_millis(1000)).await;
                                     }
                                 }
                                 // prio_fee = prio_fee.saturating_sub(1_000);
                                 // proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
-                                proof = if let Ok(loaded_proof) = wallet_clone.get_proof(&rpc_client).await {
-                                    loaded_proof
-                                } else {
-                                    tokio::time::sleep(Duration::from_millis(5000)).await;
-                                    get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
-                                };
-                                challenge = array_to_base64(&proof.challenge);
-                                wallet_clone.set_challenge(challenge.clone()).await;
-                                info!("[{}]已获取到新的proof。读取到challenge：{}，等待客户端计算",&addtess_short,challenge);
                                 break;
                             } else {
                                 // if prio_fee < 1_000_000 {
@@ -582,12 +587,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     info!("[{}]尝试3次仍无法发送。丢弃和刷新数据.",&addtess_short);
                                     // reset nonce
                                     // proof = wallet_clone.get_proof(&rpc_client).await.unwrap();
-                                    proof = if let Ok(loaded_proof) = wallet_clone.get_proof(&rpc_client).await {
-                                        loaded_proof
-                                    } else {
-                                        tokio::time::sleep(Duration::from_millis(5000)).await;
-                                        get_proof(&rpc_client, keypair.pubkey()).await.unwrap()
-                                    };
+                                    proof = get_proof(&rpc_client, keypair.pubkey()).await.unwrap();
+                                    wallet_clone.set_proof(proof).await;
                                     challenge = array_to_base64(&proof.challenge);
                                     wallet_clone.set_challenge(challenge.clone()).await;
                                     break;
