@@ -17,7 +17,6 @@ use coal_api::{
 };
 use tokio::sync::{RwLock as toRwLock};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_program::instruction::Instruction;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     signature::{read_keypair_file, Keypair},
@@ -25,12 +24,6 @@ use solana_sdk::{
 use solana_sdk::signer::Signer;
 use utils::Tip;
 use crate::mine::mine;
-use crate::send_and_confirm::{ComputeBudget, send_and_confirm, send_and_confirm_batch};
-
-struct Batch {
-    pub batch_ixs: Vec<Instruction>,
-    pub compute_budget: u32,
-}
 
 struct Wallet {
     keypairs: Keypair,
@@ -224,9 +217,6 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    dotenv::dotenv().ok();
-    let rpc_url = std::env::var("RPC_URL").expect("RPC_URL must be set.");
-    let rpc_client = Arc::new(RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed()));
     let args = Args::parse();
 
     // Load the config file from custom path, the default path, or use default config values
@@ -242,11 +232,10 @@ async fn main() {
     };
 
     // Initialize miner.
-    // let cluster = args.rpc.unwrap_or(cli_config.json_rpc_url);
+    let cluster = args.rpc.unwrap_or(cli_config.json_rpc_url);
     let default_keypair = args.keypair.unwrap_or(cli_config.keypair_path.clone());
     let fee_payer_filepath = args.fee_payer.unwrap_or(default_keypair.clone());
-    let fee_keypair = read_keypair_file(fee_payer_filepath).unwrap();
-    // let rpc_client = RpcClient::new_with_commitment(cluster, CommitmentConfig::confirmed());
+    let rpc_client = RpcClient::new_with_commitment(cluster, CommitmentConfig::confirmed());
     let jito_client = Arc::new(RpcClient::new("https://mainnet.block-engine.jito.wtf/api/v1/transactions".to_string()));
     let tip = Arc::new(RwLock::new(0_u64));
     let tip_clone = Arc::clone(&tip);
@@ -270,34 +259,14 @@ async fn main() {
             }
         });
     }
+
     let priority_fee = args.priority_fee.clone();
     let dynamic_fee_url = args.dynamic_fee_url.clone();
     let dynamic_fee = args.dynamic_fee;
-    let batch = Arc::new(toRwLock::new(Batch {
-        batch_ixs: vec![],
-        compute_budget: 0,
-    }));
-    let dynamic_fee_url_tokio = dynamic_fee_url.clone();
-    let jito_client_tokio = jito_client.clone();
-    let tip_tokio = tip.clone();
-    let bacth_tokio = batch.clone();
-    tokio::spawn(async move {
-        let dynamic_fee_url_spawn = dynamic_fee_url_tokio.clone();
-        let jito_client_spawn = jito_client_tokio.clone();
-        let tip_spawn = tip_tokio.clone();
-        let batch_spawn = bacth_tokio.clone();
-        loop{
-            match send_and_confirm_batch(rpc_client.clone(), &fee_keypair, priority_fee.clone(), dynamic_fee_url_spawn.clone(), dynamic_fee.clone(), jito_client_spawn.clone(), tip_spawn.clone(), batch_spawn.clone()).await {
-                Ok(_) => {continue}
-                Err(_) => {continue}
-            }
-        }
-    });
-
     // Execute user command.
     match args.command {
         Commands::Mine(args) => {
-            mine(args, priority_fee.clone(), dynamic_fee_url.clone(), dynamic_fee.clone(), jito_client.clone(), tip.clone(), batch.clone()).await;
+            mine(args, priority_fee, dynamic_fee_url, dynamic_fee, jito_client.clone(), tip.clone()).await;
         }
     }
 }

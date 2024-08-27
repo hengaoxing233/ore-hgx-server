@@ -20,9 +20,13 @@ enum FeeStrategy {
     Quiknode,
 }
 
-pub async fn dynamic_fee_fn(rpc_client:Arc<RpcClient>) -> Result<u64, String> {
+pub async fn dynamic_fee(rpc_client:Arc<RpcClient>, wallet:Arc<Wallet>) -> Result<u64, String> {
+    let wallet = wallet.clone();
     // Get url
-    let rpc_url = rpc_client.url();
+    let rpc_url = wallet
+        .dynamic_fee_url
+        .clone()
+        .unwrap_or(rpc_client.url());
 
     // Select fee estiamte strategy
     let host = Url::parse(&rpc_url)
@@ -154,7 +158,11 @@ pub async fn dynamic_fee_fn(rpc_client:Arc<RpcClient>) -> Result<u64, String> {
     match calculated_fee {
         Err(err) => Err(err),
         Ok(fee) => {
-            Ok(8000)
+            if let Some(max_fee) = wallet.priority_fee {
+                Ok(fee.min(max_fee))
+            } else {
+                Ok(fee)
+            }
         }
     }
 }

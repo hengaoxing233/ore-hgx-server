@@ -1,6 +1,5 @@
 use std::{sync::Arc, sync::RwLock, thread, time::Instant};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 use std::time::Duration;
 use colored::*;
 use drillx_2::{
@@ -34,7 +33,7 @@ use crate::{args::MineArgs, send_and_confirm::ComputeBudget, utils::{
     get_updated_proof_with_authority,
     ore_proof_pubkey,
     proof_pubkey
-}, Miner, Wallet, Batch};
+}, Miner, Wallet};
 use crate::log::init_log;
 use crate::send_and_confirm::send_and_confirm;
 use crate::utils::{get_cutoff, get_proof};
@@ -270,7 +269,6 @@ pub async fn mine(args: MineArgs,
                   dynamic_fee: bool,
                   jito_client: Arc<RpcClient>,
                   tip: Arc<std::sync::RwLock<u64>>,
-                  batch: Arc<toRwLock<Batch>>,
 ) {
     dotenv::dotenv().ok();
     init_log();
@@ -312,7 +310,6 @@ pub async fn mine(args: MineArgs,
 
     let rpc_client = Arc::new(RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed()));
     let rpc_clone_tokio = rpc_client.clone();
-    let batch_tokio = batch.clone();
     thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -338,25 +335,22 @@ pub async fn mine(args: MineArgs,
             return;
         }
     }
-
     let wallet_len = wallets.len();
     //debug!("循环钱包");
     for wallet in wallets{
         //debug!("循环钱包1");
-        // if wallet_len.eq(&2) {
-        //     tokio::time::sleep(Duration::from_millis(30000)).await;
-        // }else if wallet_len.eq(&3) {
-        //     tokio::time::sleep(Duration::from_millis(20000)).await;
-        // }else {
-        //     tokio::time::sleep(Duration::from_millis(5000)).await;
-        // }
+        if wallet_len.eq(&2) {
+            tokio::time::sleep(Duration::from_millis(30000)).await;
+        }else if wallet_len.eq(&3) {
+            tokio::time::sleep(Duration::from_millis(20000)).await;
+        }else {
+            tokio::time::sleep(Duration::from_millis(5000)).await;
+        }
 
         let rpc_client_for_spawn = rpc_clone_tokio.clone();
         let merged_for_spawn = merged.clone();
-        let batch_for_spawn = batch_tokio.clone();
         tokio::spawn(async move {
             //debug!("循环钱包2");
-            let batch = batch_for_spawn.clone();
             let merged = merged_for_spawn.clone();
             let wallet_clone = wallet.clone();
             let rpc_client = rpc_client_for_spawn.clone();
@@ -532,19 +526,12 @@ pub async fn mine(args: MineArgs,
                     find_bus(false, &rpc_client).await,
                     solution,
                 ));
-                {
-                    let mut batches = batch.write().await;
-                    batches.batch_ixs.extend_from_slice(&*ixs);
-                    batches.compute_budget += compute_budget;
-                }
-                debug!("循环钱包7.5");
-                tokio::time::sleep(Duration::from_millis(5000)).await;
-                debug!("循环钱包8");
+                //debug!("循环钱包8");
                 // Submit transactions
-                // match send_and_confirm(&ixs, ComputeBudget::Fixed(compute_budget), false, rpc_client.clone(), wallet_clone.clone()).await {
-                //     Ok(_) => {continue}
-                //     Err(_) => {continue}
-                // }
+                match send_and_confirm(&ixs, ComputeBudget::Fixed(compute_budget), false, rpc_client.clone(), wallet_clone.clone()).await {
+                    Ok(_) => {continue}
+                    Err(_) => {continue}
+                }
 
             }
         });
