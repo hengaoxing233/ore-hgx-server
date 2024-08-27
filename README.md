@@ -1,5 +1,5 @@
-# ore-hgx-server
-修改于： https://github.com/Kriptikz/ore-hq-server
+# coal-server
+修改于： [https://github.com/Kriptikz/ore-hq-server](https://github.com/coal-digital/coal-cli)
 
 ## 启动服务端命令
 ```./coal mine --merged ore --priority-fee 8000```
