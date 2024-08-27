@@ -1,25 +1,60 @@
 [package]
-name = "ore-hgx-server"
-version = "0.1.5"
+name = "coal-cli"
+version = "0.1.4"
 edition = "2021"
+license = "Apache-2.0"
+description = "A command line interface for ORE cryptocurrency mining."
+documentation = "https://ore.supply"
+homepage = "https://ore.supply"
+repository = "https://github.com/regolith-labs/ore-cli"
+readme = "./README.md"
+keywords = ["solana", "crypto", "mining"]
+
+[[bin]]
+name = "coal"
+path = "src/main.rs"
+
+[features]
+default = []
+admin = []
 
 [dependencies]
-axum = { version = "0.7.5", features = ["ws"] }
-drillx = "2.0.1"
-futures-util = { version = "0.3.30", default-features = false, features = ["sink", "std"] }
-ore-api = "2.1.0"
-ore-utils = "2.1.0"
-serde = { version = "1.0.204", features = ["derive"] }
-serde_json = "1.0.122"
-solana-sdk = "1.18.12"
-solana-client = "1.18.12"
-tokio = { version = "1.39.2", features = ["full"] }
-dotenv = "0.15.0"
-spl-associated-token-account = { version = "2.2", features = ["no-entrypoint"] }
-rand = "0.8.5"
-base64 = "0.22.1"
-walkdir = "2.3"
-warp = "0.3"
 bincode = "1.3.3"
+bs58 = "0.5.1"
+bytemuck = "1.16"
+cached = "0.46.1"
+chrono = "0.4.38"
+clap = { version = "4.4.12", features = ["derive"] }
+colored = "2.0"
+core_affinity = "0.8.1"
+drillx_2 = "1.0.0"
+futures = "0.3.30"
+indicatif = "0.17.8"
+num_cpus = "1.16.0"
+coal-api = "2.3.0"
+coal-utils = "2.3.0"
+ore-api = "2.1.8"
+ore-utils = "2.1.8"
+rand = "0.8.4"
+reqwest = { version = "0.12", features = ["json"] }
+solana-cli-config = "^1.18"
+solana-client = "^1.18"
+solana-program = "^1.18"
+solana-rpc-client = "^1.18"
+solana-sdk = "^1.18"
+solana-transaction-status = "^1.18"
+serde_json = "1.0"
+spl-token = { version = "^4", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "^2.3", features = [
+  "no-entrypoint",
+] }
+tokio = "1.35.1"
+url = "2.5"
+tokio-tungstenite = "0.16"
+serde = { version = "1.0", features = ["derive"] }
+base64 = "0.22.1"
+warp = "0.3"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "chrono"] }
 tracing = "0.1.40"
+dotenv = "0.15.0"
+walkdir = "2.3"
